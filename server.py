@@ -69,23 +69,23 @@ def get_list_resource() -> str:
     try:
         token = get_access_token()
         headers = {"Authorization": f"Bearer {token}"}
-        url = f"https://api.listonic.com/api/lists/{LIST_ID}?includeShares=true"
+        url = f"https://api.listonic.com/api/lists/{LIST_ID}/items"
         
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        lst = response.json()
+        items = response.json()
         
-        name = lst.get("Name", "Unnamed")
-        items_count = len(lst.get("Items", []))
-        
-        output = [f"List: {name} (ID: {LIST_ID}) - {items_count} items"]
-        for item in lst.get("Items", []):
+        if not items:
+            return "The list is currently empty."
+            
+        output = []
+        for item in items:
             item_id = item.get("Id", "")
             checked = "[x]" if str(item.get("Checked")) == "1" else "[ ]"
             item_name = item.get("Name", "")
             amount = item.get("Amount", "")
             unit = item.get("Unit", "")
-            output.append(f"  {checked} (ItemID: {item_id}) {amount} {unit} {item_name}".strip())
+            output.append(f"{checked} (ItemID: {item_id}) {amount} {unit} {item_name}".strip())
         
         return "\n".join(output)
     except Exception as e:
