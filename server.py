@@ -3,6 +3,7 @@ import logging
 import requests
 import base64
 from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
 from mcp.server.fastmcp import FastMCP
 
 # Configure logging
@@ -103,14 +104,15 @@ def get_items() -> str:
     """
     return get_list_resource()
 
+class AddItemParams(BaseModel):
+    name: str = Field(description="The name of the item to add")
+    quantity: str = Field(default="1", description="The quantity of the item")
+    unit: str = Field(default="", description="The unit of the item (e.g., 'liters', 'pieces')")
+
 @mcp.tool()
-def add_items(items: list[dict[str, Any]]) -> str:
+def add_items(items: list[AddItemParams]) -> str:
     """
     Adds one or multiple new items to your grocery list.
-    Args:
-        items: A list of dictionaries. Each dictionary must have a 'name' (str). 
-               Optionally include 'quantity' (str, default '1') and 'unit' (str, default '').
-               Example: [{"name": "Milk", "quantity": "2", "unit": "liters"}, {"name": "Bread"}]
     """
     token = get_access_token()
     headers = {"Authorization": f"Bearer {token}"}
@@ -118,15 +120,15 @@ def add_items(items: list[dict[str, Any]]) -> str:
     
     results = []
     for item in items:
-        item_name = item.get("name")
+        item_name = item.name
         if not item_name:
             results.append("Failed: Missing 'name'.")
             continue
             
         data = {
             "name": item_name,
-            "quantity": item.get("quantity", "1"),
-            "unit": item.get("unit", "")
+            "quantity": item.quantity,
+            "unit": item.unit
         }
         
         try:
@@ -165,21 +167,23 @@ def delete_items(item_ids: list[str]) -> str:
             
     return "\n".join(results)
 
+class EditItemParams(BaseModel):
+    item_id: str = Field(description="The ID of the item to edit")
+    is_checked: Optional[bool] = Field(default=None, description="Set to true to check the item, false to uncheck")
+    name: Optional[str] = Field(default=None, description="The new name for the item")
+    quantity: Optional[str] = Field(default=None, description="The new quantity")
+
 @mcp.tool()
-def edit_items(items: list[dict[str, Any]]) -> str:
+def edit_items(items: list[EditItemParams]) -> str:
     """
     Edits one or multiple existing items. Most commonly used to check/uncheck items while shopping.
-    Args:
-        items: A list of dictionaries. Each must contain 'item_id'.
-               Optional keys to update: 'is_checked' (bool), 'name' (str), 'quantity' (str).
-               Example: [{"item_id": "123", "is_checked": True}, {"item_id": "456", "quantity": "3"}]
     """
     token = get_access_token()
     headers = {"Authorization": f"Bearer {token}"}
     
     results = []
     for item in items:
-        item_id = item.get("item_id")
+        item_id = item.item_id
         if not item_id:
             results.append("Failed: Missing 'item_id'.")
             continue
@@ -187,12 +191,12 @@ def edit_items(items: list[dict[str, Any]]) -> str:
         url = f"https://api.listonic.com/api/lists/{LIST_ID}/items/{item_id}"
         
         data = {}
-        if "is_checked" in item:
-            data["isChecked"] = item["is_checked"]
-        if "name" in item:
-            data["name"] = item["name"]
-        if "quantity" in item:
-            data["quantity"] = item["quantity"]
+        if item.is_checked is not None:
+            data["isChecked"] = item.is_checked
+        if item.name is not None:
+            data["name"] = item.name
+        if item.quantity is not None:
+            data["quantity"] = item.quantity
             
         if not data:
             results.append(f"No changes provided for item {item_id}.")
