@@ -1,0 +1,43 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ArturLys/listonic-mcp",
+  "description": "Let your AI manage your real grocery list — unofficial Listonic MCP server",
+  "repository": {
+    "url": "https://github.com/ArturLys/listonic-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "listonic-mcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "LISTONIC_EMAIL",
+          "description": "Listonic account email",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "LISTONIC_PASSWORD",
+          "description": "Listonic account password",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "LISTONIC_LIST_ID",
+          "description": "Optional: pin a default list id (otherwise the account's first list is used)",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

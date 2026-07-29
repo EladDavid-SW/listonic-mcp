@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "listonic-mcp"
+version = "0.1.0"
+description = "Let your AI manage your real grocery list — unofficial Listonic MCP server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Artur Lys" }]
+keywords = ["mcp", "mcp-server", "listonic", "grocery-list", "shopping-list", "meal-planning", "claude"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "mcp>=1.2,<2",  # 2.0 removed mcp.server.fastmcp (FastMCP -> MCPServer rewrite)
+    "requests",
+    "pydantic",
+]
+
+[project.urls]
+Homepage = "https://github.com/ArturLys/listonic-mcp"
+Repository = "https://github.com/ArturLys/listonic-mcp"
+
+[project.scripts]
+listonic-mcp = "listonic_mcp:main"
+
+[tool.setuptools]
+py-modules = ["listonic_mcp"]
