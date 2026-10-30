@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  install:
+  test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -17,8 +17,23 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package
-        run: pip install .
+        run: pip install ".[test]"
       - name: Import check
         run: python -c "import listonic_mcp"
       - name: CLI boots keyless
         run: listonic-mcp --version
+      - name: HTTP transport tests (offline)
+        run: pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t listonic-mcp .
+      - name: Start and probe /health and auth
+        run: |
+          docker run -d --name mcp -p 8000:8000 -e MCP_AUTH_TOKEN="$(openssl rand -hex 32)" listonic-mcp
+          for i in $(seq 1 20); do curl -fsS http://localhost:8000/health && break; sleep 1; done
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/mcp)" = "401"
+          docker logs mcp
