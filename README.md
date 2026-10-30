@@ -91,7 +91,7 @@ What's on my grocery list? Check off the milk, I just bought it.
 | `--transport` | `MCP_TRANSPORT`        | `stdio`    | `stdio` for local clients, `http` for Streamable HTTP at `/mcp`. The Docker image sets `http`. |
 | `--host`      | `HOST`                 | `0.0.0.0`  | Bind address.                                                         |
 | `--port`      | `PORT`                 | `8000`     | Listen port. Render injects `PORT` automatically.                     |
-| —             | `MCP_AUTH_TOKEN`       | —          | **Required for `http`.** Shared secret (≥ 32 chars) clients send as `Authorization: Bearer …`. The server refuses to start without it. |
+| —             | `MCP_AUTH_TOKEN`       | —          | **Required for `http`.** Shared secret (≥ 32 chars) clients send as `Authorization: Bearer …`, `X-API-Key: …` or `X-MCP-API-Key: …`. The server refuses to start without it. |
 | —             | `MCP_ALLOW_PATH_TOKEN` | `false`    | `true` also accepts `/mcp/<MCP_AUTH_TOKEN>` for clients that can't send headers. See [Authentication](#authentication). |
 
 ## Remote deployment (Render Free, Docker)
@@ -164,6 +164,15 @@ curl -s -X POST $MCP_URL/mcp \
   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
 
+# Same handshake with the API-key header claude.ai uses (raw token, no "Bearer") → 200:
+curl -s -o /dev/null -w '%{http_code}\n' -X POST $MCP_URL/mcp \
+  -H "x-api-key: $MCP_AUTH_TOKEN" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+
+# OAuth discovery → 404 (no OAuth server; public, exposes nothing):
+curl -s -o /dev/null -w '%{http_code}\n' $MCP_URL/.well-known/oauth-protected-resource
+
 # Read your lists (live Listonic call):
 curl -s -X POST $MCP_URL/mcp \
   -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
@@ -219,15 +228,40 @@ claude mcp add --transport http listonic https://<your-service-name>.onrender.co
 }
 ```
 
-**claude.ai custom connector** — *Customize → Connectors → Add custom connector*, URL `https://<host>/mcp`. If your dialog has **Request headers** (beta, not on every account), choose *No sign-in* and add header `authorization` = `Bearer <MCP_AUTH_TOKEN>`. If it doesn't, see the secret-path option below.
+**claude.ai custom connector (request header, recommended)**
+
+*Customize → Connectors → Add custom connector*, then:
+
+| Field | Value |
+|---|---|
+| URL | `https://<your-service-name>.onrender.com/mcp` (no token in the URL) |
+| Authentication | **No sign-in** |
+| Request header name | `x-api-key` |
+| Request header value | your `MCP_AUTH_TOKEN` — the raw token, **without** a `Bearer ` prefix |
+
+Notes:
+
+- Request headers are a **beta** feature of the claude.ai connector dialog (only shown to some organizations, set by an Owner). If you don't see a **Request headers** section, your account can't send static headers yet — use Claude Code / `mcp-remote` above, or the opt-in secret-path mode below.
+- Claude documents `authorization`, `x-api-key` and `x-auth-token` as accepted header names; other names need Anthropic's approval before the dialog saves them. That's why `x-api-key` is the recommended name here. The server also accepts `X-MCP-API-Key` (raw token) for clients that let you choose any name, and `Authorization: Bearer <token>` as before.
+- The server answers OAuth discovery (`/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration`) with a public `404`: there is no OAuth server, and nothing is exposed there.
+
+**Troubleshooting claude.ai.** Watch the Render logs while you click *Connect*. Every rejected request logs the *names* (never values) of credential headers that arrived:
+
+- `POST /mcp -> 401 (credential headers: none)` — claude.ai did not deliver the header. Re-check that the connector uses *No sign-in* and that the header was saved; if it still arrives empty, it's on the claude.ai side (see [anthropics/claude-ai-mcp#644](https://github.com/anthropics/claude-ai-mcp/issues/644)), not the server — test the server itself with `curl -H "x-api-key: $MCP_AUTH_TOKEN" …` as in step 3.
+- `POST /mcp -> 401 (credential headers: x-api-key)` — the header arrived but the value is wrong (extra `Bearer ` prefix, whitespace, or an old token).
+- `GET /.well-known/oauth-… -> 404` — expected: Claude probing for OAuth and finding none.
 
 **ChatGPT** — see [ChatGPT limitations](#chatgpt-limitations).
 
 ### Authentication
 
-- Every request except `GET /health` needs `Authorization: Bearer <MCP_AUTH_TOKEN>`; anything else gets `401`. Tokens are compared in constant time.
+- Every request except `GET /health` (and the OAuth discovery `404`s) needs the token in one of these headers; anything else gets `401`. Tokens are compared in constant time.
+  - `Authorization: Bearer <MCP_AUTH_TOKEN>`
+  - `X-API-Key: <MCP_AUTH_TOKEN>` (raw token, no `Bearer`) — use this for claude.ai
+  - `X-MCP-API-Key: <MCP_AUTH_TOKEN>` (raw token, no `Bearer`)
+- OAuth discovery paths return a public `404` with no body beyond `Not Found` — there is no OAuth, so clients are told so instead of getting a `401` that looks like a locked authorization server.
 - The server **refuses to start** in HTTP mode if `MCP_AUTH_TOKEN` is missing or shorter than 32 characters, so the endpoint is never exposed unauthenticated.
-- Logs show method, path and status only. Passwords, Listonic session tokens and the MCP token are never logged (the Listonic email is masked, uvicorn's access log is off).
+- Logs show method, path and status only (plus, on a `401`, the *names* of credential headers that arrived). Passwords, Listonic session tokens and the MCP token are never logged (the Listonic email is masked, uvicorn's access log is off).
 - **Secret-path mode (opt-in):** some clients (ChatGPT, claude.ai without request headers) can only do OAuth or "no auth". For those, set `MCP_ALLOW_PATH_TOKEN=true` and use `https://<host>/mcp/<MCP_AUTH_TOKEN>` as the URL. Trade-off: the URL itself becomes the credential — anyone who sees it (screenshots, shared configs, client-side history) can manage your list. Wrong paths return `404`. Only enable it if you need it.
 - **Rotate** the token by changing `MCP_AUTH_TOKEN` in Render (it redeploys) and updating your clients.
 - Full OAuth 2.1 is not implemented — intentionally, to keep this single-user server simple.

@@ -17,7 +17,8 @@ Transports:
   http             — Streamable HTTP at /mcp for remote hosting (e.g. Render),
                      selected with --transport http or MCP_TRANSPORT=http. Binds
                      to HOST (default 0.0.0.0) and PORT (default 8000), serves an
-                     unauthenticated GET /health, and requires MCP_AUTH_TOKEN for
+                     unauthenticated GET /health, and requires MCP_AUTH_TOKEN
+                     (Authorization: Bearer, X-API-Key or X-MCP-API-Key) for
                      everything else (see README → "Remote deployment").
 
 Unofficial: not affiliated with Listonic. The API is reverse-engineered from
@@ -323,12 +324,22 @@ class AuthMiddleware:
     """Pure-ASGI guard in front of the MCP app.
 
     - ``GET /health`` is public (no Listonic access, no data).
-    - Everything else needs ``Authorization: Bearer <MCP_AUTH_TOKEN>``.
+    - OAuth discovery paths (``/.well-known/oauth-*``, ``openid-configuration``)
+      answer a public ``404``: this server has no OAuth authorization server, and
+      a 404 is the standard "no metadata here" signal. They expose nothing.
+    - Everything else needs the shared secret ``MCP_AUTH_TOKEN`` in one of:
+        ``Authorization: Bearer <token>``  (original method, unchanged)
+        ``X-API-Key: <token>``             (claude.ai "Request headers" — a
+                                            standard name the dialog accepts)
+        ``X-MCP-API-Key: <token>``         (custom name for other clients)
+      The API-key headers carry the raw token, without a ``Bearer`` prefix.
     - Optionally (``MCP_ALLOW_PATH_TOKEN=true``) ``/mcp/<MCP_AUTH_TOKEN>`` is also
       accepted, for MCP clients that cannot send custom headers. The token is
       stripped from the path before the request reaches the MCP app.
 
-    Tokens are compared in constant time and never logged.
+    Tokens are compared in constant time and never logged. On a 401 the log
+    line lists only the *names* of credential headers that arrived (never their
+    values), so you can tell "client sent no header" from "header had a wrong value".
     """
 
     def __init__(self, app, token: str, allow_path_token: bool = False):
@@ -337,7 +348,7 @@ class AuthMiddleware:
         self._allow_path_token = allow_path_token
 
     def _matches(self, candidate: str) -> bool:
-        return hmac.compare_digest(candidate.encode(), self._token)
+        return bool(candidate) and hmac.compare_digest(candidate.encode(), self._token)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":  # lifespan etc. pass straight through
@@ -346,6 +357,7 @@ class AuthMiddleware:
 
         path: str = scope.get("path", "")
         log_path = path
+        log_note = ""
         status_holder = {"status": 0}
 
         async def send_wrapper(message):
@@ -367,21 +379,58 @@ class AuthMiddleware:
                     await _plain(send_wrapper, 404, b"Not Found")
                 return
 
-            auth = ""
-            for key, value in scope.get("headers", []):
-                if key == b"authorization":
-                    auth = value.decode("latin-1")
-                    break
-            scheme, _, credential = auth.partition(" ")
-            if scheme.lower() == "bearer" and credential and self._matches(credential.strip()):
+            if _is_oauth_discovery(path):
+                # No OAuth here. Public 404 (not 401) so clients stop looking for
+                # an authorization server instead of treating discovery as "locked".
+                await _plain(send_wrapper, 404, b"Not Found")
+                return
+
+            presented = _credential_headers(scope)
+            if any(self._matches(c) for _, c in presented):
                 await self.app(scope, receive, send_wrapper)
             else:
+                log_note = " (credential headers: %s)" % (
+                    ", ".join(sorted({n for n, _ in presented})) or "none")
                 await _plain(
                     send_wrapper, 401, b"Unauthorized",
                     extra_headers=[(b"www-authenticate", b'Bearer realm="listonic-mcp"')],
                 )
         finally:
-            logger.info("%s %s -> %s", scope.get("method", "?"), log_path, status_holder["status"])
+            logger.info("%s %s -> %s%s", scope.get("method", "?"), log_path,
+                        status_holder["status"], log_note)
+
+
+API_KEY_HEADERS = (b"x-api-key", b"x-mcp-api-key")
+OAUTH_DISCOVERY_PREFIXES = (
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/openid-configuration",
+)
+
+
+def _is_oauth_discovery(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in OAUTH_DISCOVERY_PREFIXES)
+
+
+def _credential_headers(scope) -> list[tuple[str, str]]:
+    """(header name, candidate token) for every credential header on the request.
+
+    ``Authorization`` counts only with the ``Bearer`` scheme; API-key headers carry
+    the raw token. Values are only ever compared, never logged.
+    """
+    found: list[tuple[str, str]] = []
+    for key, value in scope.get("headers", []):
+        key = key.lower()
+        if key == b"authorization":
+            scheme, _, credential = value.decode("latin-1").partition(" ")
+            if scheme.lower() == "bearer" and credential.strip():
+                found.append(("authorization", credential.strip()))
+            else:
+                found.append(("authorization(non-bearer)", ""))
+        elif key in API_KEY_HEADERS:
+            credential = value.decode("latin-1").strip()
+            found.append((key.decode(), credential))
+    return found
 
 
 async def _plain(send, status: int, body: bytes, extra_headers=None) -> None:
@@ -433,7 +482,7 @@ def _run_http(host: str, port: int) -> None:
     allow_path_token = _truthy(os.environ.get("MCP_ALLOW_PATH_TOKEN"))
     app = build_http_app(token, allow_path_token)
     print(
-        f"listonic-mcp · Streamable HTTP on {host}:{port}{MCP_PATH} · auth: bearer"
+        f"listonic-mcp · Streamable HTTP on {host}:{port}{MCP_PATH} · auth: bearer / x-api-key / x-mcp-api-key"
         + (" + secret path" if allow_path_token else ""),
         file=sys.stderr,
     )
