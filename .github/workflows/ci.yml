@@ -33,7 +33,17 @@ jobs:
         run: docker build -t listonic-mcp .
       - name: Start and probe /health and auth
         run: |
-          docker run -d --name mcp -p 8000:8000 -e MCP_AUTH_TOKEN="$(openssl rand -hex 32)" listonic-mcp
+          TOKEN="$(openssl rand -hex 32)"
+          docker run -d --name mcp -p 8000:8000 -e MCP_AUTH_TOKEN="$TOKEN" listonic-mcp
           for i in $(seq 1 20); do curl -fsS http://localhost:8000/health && break; sleep 1; done
-          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/mcp)" = "401"
+          INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}'
+          code() { curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/mcp \
+            -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$INIT" "$@"; }
+          test "$(code)" = "401"
+          test "$(code -H 'x-api-key: wrong')" = "401"
+          test "$(code -H "x-api-key: $TOKEN")" = "200"
+          test "$(code -H "X-MCP-API-Key: $TOKEN")" = "200"
+          test "$(code -H "Authorization: Bearer $TOKEN")" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/.well-known/oauth-protected-resource)" = "404"
+          ! docker logs mcp 2>&1 | grep -qF "$TOKEN"
           docker logs mcp
