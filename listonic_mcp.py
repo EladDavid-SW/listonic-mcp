@@ -12,6 +12,14 @@ Config comes from launch params — pass --email and --password in the server's
 (LISTONIC_LIST_ID) pins a default list; otherwise the first list on the account
 is used. No .env needed.
 
+Transports:
+  stdio (default)  — for local MCP clients that launch the process themselves.
+  http             — Streamable HTTP at /mcp for remote hosting (e.g. Render),
+                     selected with --transport http or MCP_TRANSPORT=http. Binds
+                     to HOST (default 0.0.0.0) and PORT (default 8000), serves an
+                     unauthenticated GET /health, and requires MCP_AUTH_TOKEN for
+                     everything else (see README → "Remote deployment").
+
 Unofficial: not affiliated with Listonic. The API is reverse-engineered from
 their web app (see API.md) — the embedded client id/secret below are the web
 app's own public ones, not personal credentials.
@@ -21,6 +29,7 @@ It's a small, single-purpose server — feel free to edit anything.
 
 import argparse
 import base64
+import hmac
 import logging
 import os
 import sys
@@ -290,6 +299,151 @@ def delete_items(item_ids: list[str], list_id: str = "") -> str:
     return "\n".join(results)
 
 
+
+# --------------------------------------------------------------------------- #
+# Remote (Streamable HTTP) mode
+# --------------------------------------------------------------------------- #
+
+MCP_PATH = "/mcp"
+HEALTH_PATH = "/health"
+MIN_TOKEN_LENGTH = 32
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _mask_email(email: str) -> str:
+    """'someone@example.com' -> 'so***@example.com' — keeps logs useful, not revealing."""
+    name, _, domain = email.partition("@")
+    return f"{name[:2]}***@{domain}" if domain else "***"
+
+
+class AuthMiddleware:
+    """Pure-ASGI guard in front of the MCP app.
+
+    - ``GET /health`` is public (no Listonic access, no data).
+    - Everything else needs ``Authorization: Bearer <MCP_AUTH_TOKEN>``.
+    - Optionally (``MCP_ALLOW_PATH_TOKEN=true``) ``/mcp/<MCP_AUTH_TOKEN>`` is also
+      accepted, for MCP clients that cannot send custom headers. The token is
+      stripped from the path before the request reaches the MCP app.
+
+    Tokens are compared in constant time and never logged.
+    """
+
+    def __init__(self, app, token: str, allow_path_token: bool = False):
+        self.app = app
+        self._token = token.encode()
+        self._allow_path_token = allow_path_token
+
+    def _matches(self, candidate: str) -> bool:
+        return hmac.compare_digest(candidate.encode(), self._token)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan etc. pass straight through
+            await self.app(scope, receive, send)
+            return
+
+        path: str = scope.get("path", "")
+        log_path = path
+        status_holder = {"status": 0}
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                status_holder["status"] = message["status"]
+            await send(message)
+
+        try:
+            if path == HEALTH_PATH:
+                await self.app(scope, receive, send_wrapper)
+                return
+
+            if self._allow_path_token and path.startswith(MCP_PATH + "/"):
+                log_path = MCP_PATH + "/<redacted>"
+                if self._matches(path[len(MCP_PATH) + 1:].rstrip("/")):
+                    scope = dict(scope, path=MCP_PATH, raw_path=MCP_PATH.encode())
+                    await self.app(scope, receive, send_wrapper)
+                else:
+                    await _plain(send_wrapper, 404, b"Not Found")
+                return
+
+            auth = ""
+            for key, value in scope.get("headers", []):
+                if key == b"authorization":
+                    auth = value.decode("latin-1")
+                    break
+            scheme, _, credential = auth.partition(" ")
+            if scheme.lower() == "bearer" and credential and self._matches(credential.strip()):
+                await self.app(scope, receive, send_wrapper)
+            else:
+                await _plain(
+                    send_wrapper, 401, b"Unauthorized",
+                    extra_headers=[(b"www-authenticate", b'Bearer realm="listonic-mcp"')],
+                )
+        finally:
+            logger.info("%s %s -> %s", scope.get("method", "?"), log_path, status_holder["status"])
+
+
+async def _plain(send, status: int, body: bytes, extra_headers=None) -> None:
+    headers = [(b"content-type", b"text/plain; charset=utf-8"),
+               (b"content-length", str(len(body)).encode())]
+    await send({"type": "http.response.start", "status": status,
+                "headers": headers + (extra_headers or [])})
+    await send({"type": "http.response.body", "body": body})
+
+
+def build_http_app(auth_token: str, allow_path_token: bool = False):
+    """The Streamable HTTP ASGI app: MCP at /mcp, /health, wrapped in AuthMiddleware."""
+    from mcp.server.transport_security import TransportSecuritySettings
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    # Stateless + plain-JSON responses: no server-side session to lose when the
+    # Render Free instance spins down/restarts, and no long-lived SSE streams.
+    mcp.settings.stateless_http = True
+    mcp.settings.json_response = True
+    mcp.settings.streamable_http_path = MCP_PATH
+    # FastMCP's DNS-rebinding guard only allows localhost Host headers by default,
+    # which would reject *.onrender.com. That guard protects unauthenticated local
+    # servers; here every MCP request must carry the bearer token instead.
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=False
+    )
+
+    async def health(_request):
+        return JSONResponse({"status": "ok", "listonic_configured": client is not None})
+
+    # A session manager can only run once; start fresh so the builder is reusable
+    # (tests build several apps in one process).
+    mcp._session_manager = None
+    app = mcp.streamable_http_app()
+    app.router.routes.append(Route(HEALTH_PATH, health, methods=["GET", "HEAD"]))
+    return AuthMiddleware(app, auth_token, allow_path_token)
+
+
+def _run_http(host: str, port: int) -> None:
+    import uvicorn
+
+    token = os.environ.get("MCP_AUTH_TOKEN", "").strip()
+    if len(token) < MIN_TOKEN_LENGTH:
+        sys.exit(
+            f"listonic-mcp: refusing to start HTTP transport — set MCP_AUTH_TOKEN to a random "
+            f"secret of at least {MIN_TOKEN_LENGTH} characters (e.g. `openssl rand -hex 32`)."
+        )
+    allow_path_token = _truthy(os.environ.get("MCP_ALLOW_PATH_TOKEN"))
+    app = build_http_app(token, allow_path_token)
+    print(
+        f"listonic-mcp · Streamable HTTP on {host}:{port}{MCP_PATH} · auth: bearer"
+        + (" + secret path" if allow_path_token else ""),
+        file=sys.stderr,
+    )
+    # access_log off: our middleware logs method/path/status with the token redacted.
+    uvicorn.run(
+        app, host=host, port=port, access_log=False, log_level="info",
+        proxy_headers=True, forwarded_allow_ips="*",
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="listonic-mcp", description="Unofficial Listonic (grocery list) MCP server."
@@ -308,6 +462,20 @@ def _parse_args() -> argparse.Namespace:
         help="Pin a default list id (see get_lists). Falls back to LISTONIC_LIST_ID; "
              "empty = the account's first list.",
     )
+    p.add_argument(
+        "--transport", choices=["stdio", "http"],
+        default=(os.environ.get("MCP_TRANSPORT") or "stdio").strip().lower(),
+        help="stdio (local clients, default) or http (Streamable HTTP at /mcp). "
+             "Falls back to MCP_TRANSPORT.",
+    )
+    p.add_argument(
+        "--host", default=os.environ.get("HOST", "0.0.0.0"),
+        help="HTTP bind address (http transport). Falls back to HOST; default 0.0.0.0.",
+    )
+    p.add_argument(
+        "--port", type=int, default=int(os.environ.get("PORT") or 8000),
+        help="HTTP port (http transport). Falls back to PORT (set by Render); default 8000.",
+    )
     args, _ = p.parse_known_args()
     return args
 
@@ -318,13 +486,16 @@ def main() -> None:
     args = _parse_args()
     if args.email and args.password:
         client = ListonicClient(args.email, args.password, args.list_id)
-        status = f"account {args.email}" + (
+        status = f"account {_mask_email(args.email)}" + (
             f", pinned list {args.list_id}" if args.list_id else ", default = first list"
         )
     else:
         status = "no credentials — tools will report this until restarted with --email/--password"
     print(f"listonic-mcp · {status}", file=sys.stderr)
-    mcp.run()
+    if args.transport == "http":
+        _run_http(args.host, args.port)
+    else:
+        mcp.run()
 
 
 if __name__ == "__main__":
