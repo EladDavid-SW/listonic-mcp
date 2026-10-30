@@ -17,10 +17,14 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "mcp>=1.2,<2",  # 2.0 removed mcp.server.fastmcp (FastMCP -> MCPServer rewrite)
+    "mcp>=1.23,<2",  # 2.0 removed mcp.server.fastmcp; >=1.23 for Streamable HTTP + TransportSecuritySettings
     "requests",
     "pydantic",
+    "uvicorn>=0.30",  # HTTP transport (already an mcp dependency; listed explicitly)
 ]
+
+[project.optional-dependencies]
+test = ["pytest", "httpx"]
 
 [project.urls]
 Homepage = "https://github.com/ArturLys/listonic-mcp"

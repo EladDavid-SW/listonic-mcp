@@ -5,3 +5,8 @@ build/
 *.egg-info/
 __pycache__/
 *.pyc
+.env
+.env.*
+tests/
+.github/
+.pytest_cache/

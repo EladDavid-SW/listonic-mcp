@@ -1,0 +1,26 @@
+# Render Blueprint — optional. Only used if you deploy via "New → Blueprint".
+# A manually created Web Service ignores this file; configure the same settings
+# in the dashboard instead (see README → "Deploy on Render").
+services:
+  - type: web
+    name: listonic-mcp
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: MCP_TRANSPORT
+        value: http
+      # Secrets: `sync: false` makes Render prompt for them in the dashboard —
+      # values are never stored in this repository.
+      - key: MCP_AUTH_TOKEN
+        sync: false
+      - key: LISTONIC_EMAIL
+        sync: false
+      - key: LISTONIC_PASSWORD
+        sync: false
+      - key: LISTONIC_LIST_ID
+        sync: false
+      - key: MCP_ALLOW_PATH_TOKEN
+        value: "false"
